@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Source profile that macaw-auth refreshes (short-lived keys, 1 h).
+PROFILE="codex_prod"
+# Profile Codex uses. Its credential_process (~/.local/bin/codex-bedrock-creds)
+# reads codex_prod and re-runs macaw-auth from the keyring when keys are near
+# expiry, so a running Codex never needs a restart.
+CODEX_PROFILE="codex_bedrock"
+CODEX_PROVIDER="amazon-bedrock-runtime"
+DEFAULT_REGION="us-east-1"
+REGION="$DEFAULT_REGION"
+APP_REGION="$DEFAULT_REGION"
+ENV_FILE="$HOME/.codex/.env"
+CONFIG_FILE="$HOME/.codex/config.toml"
+
+# ── Model resolution ──────────────────────────────────────────
+select_region_for_model() {
+    REGION="$DEFAULT_REGION"
+}
+
+resolve_model() {
+    case "${1:-}" in
+        astra|6) MODEL="global.openai.gpt-6-astra" ;;
+        sol)      MODEL="global.openai.gpt-6-sol" ;;
+        luna)     MODEL="global.openai.gpt-6-luna" ;;
+        "")    pick_model ;;
+        *)
+            echo "Unknown model: $1"
+            echo "Options: astra (or 6), sol, luna"
+            echo "Flags: -auth/--auth, --app [astra|sol|luna]"
+            exit 1
+            ;;
+    esac
+
+    select_region_for_model "$MODEL"
+    echo "Using $MODEL in $REGION"
+}
+
+pick_model() {
+    local MODELS=(
+        "global.openai.gpt-6-astra"
+        "global.openai.gpt-6-luna"
+        "global.openai.gpt-6-sol"
+    )
+
+    echo ""
+    echo "Select a model:"
+
+    for i in "${!MODELS[@]}"; do
+        printf "  %d) %s\n" $((i + 1)) "${MODELS[$i]}"
+    done
+
+    echo ""
+    read -rp "Enter number [1]: " choice
+    choice="${choice:-1}"
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] &&
+       (( choice >= 1 && choice <= ${#MODELS[@]} )); then
+        MODEL="${MODELS[$((choice - 1))]}"
+    else
+        echo "Invalid selection. Defaulting to ${MODELS[0]}."
+        MODEL="${MODELS[0]}"
+    fi
+
+}
+
+configure_desktop_model() {
+    local desktop_model="$1"
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "Missing Codex config: $CONFIG_FILE" >&2
+        exit 1
+    fi
+
+    perl -0pi -e \
+        "s/^model = .*$/model = \"$desktop_model\"/m;
+         s/^model_provider = .*$/model_provider = \"$CODEX_PROVIDER\"/m;
+         s/^\\[model_providers\\.(?:amazon-bedrock|amazon-bedrock-runtime)\\.aws\\]$/[model_providers.$CODEX_PROVIDER.aws]/m" \
+        "$CONFIG_FILE"
+}
+
+# ── Prep ──────────────────────────────────────────────────────
+mkdir -p "$HOME/.codex"
+
+# Prevent stale Bedrock bearer token from overriding AWS creds
+unset AWS_BEARER_TOKEN_BEDROCK 2>/dev/null || true
+
+# ── Authenticate ──────────────────────────────────────────────
+echo "Authenticating with macaw-auth..."
+
+macaw-auth login "$PROFILE" \
+    --target-profile "$PROFILE"
+
+echo "Verifying the self-refreshing $CODEX_PROFILE profile..."
+
+AWS_REGION="$DEFAULT_REGION" \
+AWS_DEFAULT_REGION="$DEFAULT_REGION" \
+aws sts get-caller-identity --profile "$CODEX_PROFILE" >/dev/null
+
+echo "AWS credentials are valid."
+
+# ── Write Codex Desktop environment ───────────────────────────
+# No static keys here on purpose: static AWS_* env vars would pin the app to
+# one hour-old token. The profile's credential_process refreshes itself.
+cat > "$ENV_FILE" <<EOF
+AWS_PROFILE=$CODEX_PROFILE
+AWS_REGION=$APP_REGION
+AWS_DEFAULT_REGION=$APP_REGION
+EOF
+
+chmod 600 "$ENV_FILE"
+
+echo "Updated $ENV_FILE"
+
+# ── Auth only ─────────────────────────────────────────────────
+if [[ "${1:-}" == "-auth" || "${1:-}" == "--auth" ]]; then
+    echo "Authentication complete."
+    exit 0
+fi
+
+# ── Launch Codex Desktop ──────────────────────────────────────
+if [[ "${1:-}" == "--app" ]]; then
+    resolve_model "${2:-astra}"
+    configure_desktop_model "$MODEL"
+
+    # Codex Desktop is hosted inside ChatGPT.app; its codex app-server child
+    # loads ~/.codex/.env once at start. Only quitting ChatGPT replaces it.
+    echo "Restarting Codex Desktop in $APP_REGION (ChatGPT.app host)..."
+
+    osascript -e 'quit app "ChatGPT"' 2>/dev/null || true
+
+    for _ in $(seq 1 20); do
+        pgrep -f 'Resources/codex .*app-server' >/dev/null || break
+        sleep 0.5
+    done
+
+    # Kill any leftover app-server if the host did not take it down
+    pkill -f 'Resources/codex .*app-server' 2>/dev/null || true
+
+    sleep 1
+
+    open -a ChatGPT
+
+    echo "Codex Desktop relaunched. Credentials now refresh in place; no further restarts needed."
+    exit 0
+fi
+
+# ── CLI model selection ───────────────────────────────────────
+resolve_model "${1:-}"
+
+echo "Launching Codex CLI..."
+
+exec env \
+    -u AWS_BEARER_TOKEN_BEDROCK \
+    -u OPENAI_API_KEY \
+    -u AWS_ACCESS_KEY_ID \
+    -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN \
+    AWS_PROFILE="$CODEX_PROFILE" \
+    AWS_REGION="$REGION" \
+    AWS_DEFAULT_REGION="$REGION" \
+    codex \
+        -c "model_provider=\"$CODEX_PROVIDER\"" \
+        -c "model_providers.$CODEX_PROVIDER.aws.profile=\"$CODEX_PROFILE\"" \
+        -c "model_providers.$CODEX_PROVIDER.aws.region=\"$REGION\"" \
+        --model "$MODEL"

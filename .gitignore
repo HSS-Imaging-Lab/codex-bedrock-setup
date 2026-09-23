@@ -1,0 +1,13 @@
+.env
+.aws/
+credentials
+auth.json
+logs/
+sessions/
+attachments/
+*.pem
+*.key
+config.toml
+
+__pycache__/
+*.py[cod]

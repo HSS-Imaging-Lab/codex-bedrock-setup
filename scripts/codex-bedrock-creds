@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Self-refreshing AWS credential_process for the `codex_bedrock` profile.
+
+Reads the short-lived keys that macaw-auth writes into ~/.aws/credentials
+[codex_prod]. When they are close to expiry it re-runs macaw-auth login
+(non-interactive, password from the keyring) and returns the fresh keys.
+
+Modes:
+  codex-bedrock-creds             credential_process: print JSON for the SDK
+  codex-bedrock-creds --refresh   launchd/cron: refresh if fewer than
+                                  --min N minutes remain (default 55); no JSON
+"""
+from __future__ import annotations
+
+import configparser
+import fcntl
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+HOME = Path.home()
+CRED_FILE = HOME / ".aws" / "credentials"
+SOURCE_PROFILE = "codex_prod"
+MACAW = HOME / ".local" / "bin" / "macaw-auth"
+LOG = HOME / ".codex" / "logs" / "bedrock-refresh.log"
+LOCK = HOME / ".codex" / "logs" / "bedrock-refresh.lock"
+# credential_process mode: refresh when this little remains
+PROCESS_REFRESH_MIN = int(os.environ.get("CODEX_BEDROCK_REFRESH_MIN", "6"))
+# Tell the SDK the keys expire this much earlier than they do, so it asks
+# again while there is still time to refresh without a failed request.
+REPORT_EARLY = timedelta(minutes=5)
+
+
+def log(msg: str) -> None:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    with LOG.open("a") as fh:
+        fh.write(f"{stamp} [{os.getpid()}] {msg}\n")
+
+
+def read_creds() -> dict[str, str] | None:
+    parser = configparser.ConfigParser()
+    parser.read(CRED_FILE)
+    if SOURCE_PROFILE not in parser:
+        return None
+    section = parser[SOURCE_PROFILE]
+    needed = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "expiration")
+    if any(key not in section for key in needed):
+        return None
+    return {key: section[key].strip() for key in needed}
+
+
+def expiry_of(creds: dict[str, str]) -> datetime:
+    exp = datetime.fromisoformat(creds["expiration"])
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp.astimezone(timezone.utc)
+
+
+def remaining(creds: dict[str, str] | None) -> timedelta:
+    if creds is None:
+        return timedelta(0)
+    return expiry_of(creds) - datetime.now(timezone.utc)
+
+
+def refresh(threshold: timedelta, reason: str) -> dict[str, str] | None:
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        creds = read_creds()
+        left = remaining(creds)
+        if creds is not None and left > threshold:
+            log(f"{reason}: another process already refreshed; {left} remaining")
+            return creds
+        log(f"{reason}: refreshing via macaw-auth ({left} remaining)")
+        env = dict(os.environ)
+        env["PATH"] = (
+            f"{HOME / '.local' / 'bin'}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"
+            + env.get("PATH", "")
+        )
+        env.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+        try:
+            proc = subprocess.run(
+                [str(MACAW), "login", SOURCE_PROFILE, "--target-profile", SOURCE_PROFILE],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            log("macaw-auth login timed out after 180s")
+            return read_creds()
+        tail = (proc.stdout + proc.stderr).strip().splitlines()[-3:]
+        log(f"macaw-auth exit={proc.returncode}: " + " | ".join(line.strip() for line in tail))
+        creds = read_creds()
+        log(f"now {remaining(creds)} remaining")
+        return creds
+
+
+def main(argv: list[str]) -> int:
+    if "--refresh" in argv:
+        minutes = 55
+        if "--min" in argv:
+            minutes = int(argv[argv.index("--min") + 1])
+        creds = read_creds()
+        left = remaining(creds)
+        if creds is not None and left > timedelta(minutes=minutes):
+            log(f"scheduled check: {left} remaining, above {minutes}m threshold, no refresh")
+            return 0
+        creds = refresh(timedelta(minutes=minutes), "scheduled refresh")
+        return 0 if creds is not None and remaining(creds) > timedelta(0) else 1
+
+    creds = read_creds()
+    if remaining(creds) < timedelta(minutes=PROCESS_REFRESH_MIN):
+        creds = refresh(timedelta(minutes=PROCESS_REFRESH_MIN), "credential_process")
+    if creds is None or remaining(creds) <= timedelta(0):
+        print(
+            "codex-bedrock-creds: no valid codex_prod credentials and refresh failed; "
+            "run `macaw-auth login codex_prod --target-profile codex_prod`",
+            file=sys.stderr,
+        )
+        return 1
+    reported = expiry_of(creds) - REPORT_EARLY
+    print(
+        json.dumps(
+            {
+                "Version": 1,
+                "AccessKeyId": creds["aws_access_key_id"],
+                "SecretAccessKey": creds["aws_secret_access_key"],
+                "SessionToken": creds["aws_session_token"],
+                "Expiration": reported.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
