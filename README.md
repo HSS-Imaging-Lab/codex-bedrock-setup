@@ -58,9 +58,10 @@ profile = "codex_prod"
 region = "us-east-1"
 ```
 
-The catalog should contain only these model IDs and display names:
+The catalog contains these model IDs and display names:
 
 - `global.openai.gpt-6-astra` — `6 Astra (Global)`
+- `global.openai.gpt-6.1-sol` — `6.1 Sol (Global)`
 - `global.openai.gpt-6-sol` — `6 Sol (Global)`
 - `global.openai.gpt-6-luna` — `6 Luna (Global)`
 
