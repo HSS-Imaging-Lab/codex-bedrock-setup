@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Change the launchd refresh cadence.
-# Usage: bash ~/.codex/scripts/codex-bedrock-set-interval.sh <seconds>
+# Change the macOS launchd refresh cadence.
+# Usage: bash ~/.codex/scripts/bedrock-codex-interval-macos.sh <seconds>
 #        3000 = 50 minutes (normal), 30 = short test (do not leave running)
 set -euo pipefail
 SECS="${1:?seconds}"

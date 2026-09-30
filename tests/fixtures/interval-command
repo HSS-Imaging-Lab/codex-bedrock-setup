@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${0##*/}" in
+    uname)
+        printf '%s\n' "${TEST_PLATFORM:-Linux}"
+        ;;
+    systemctl)
+        [[ "${1:-}" == '--user' ]] || {
+            echo 'Test failed: systemctl must use --user.' >&2
+            exit 99
+        }
+        printf '%s\n' "$*" >> "$TEST_SYSTEMCTL_LOG"
+        shift
+        [[ "${TEST_FAIL_ACTION:-}" != "${1:-}" ]] || exit 1
+        case "${1:-}" in
+            show)
+                case "$2" in
+                    *.timer) printf '%s\n' "${TEST_TIMER_STATE:-loaded}" ;;
+                    *.service) printf '%s\n' "${TEST_SERVICE_STATE:-not-found}" ;;
+                    *) exit 99 ;;
+                esac
+                ;;
+            list-timers|daemon-reload|enable|restart) ;;
+            *) exit 99 ;;
+        esac
+        ;;
+    bedrock-codex)
+        echo 'Test failed: the interval script must not authenticate directly.' >&2
+        exit 99
+        ;;
+    *) exit 99 ;;
+esac

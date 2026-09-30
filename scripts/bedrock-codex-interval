@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Change the per-user credential refresh cadence on Linux.
+# Usage: bedrock-codex-interval <seconds> [existing-timer.timer]
+#        3000 = 50 minutes (normal), 30 = short test (do not leave running)
+set -euo pipefail
+
+usage() {
+    printf '%s\n' \
+        'Usage: bedrock-codex-interval <seconds> [existing-timer.timer]' \
+        'Creates codex-bedrock-refresh.timer, or updates the named user timer.' \
+        'Requires Linux with a systemd user manager.'
+}
+
+fail() {
+    printf 'Error: %s\n' "$1" >&2
+    exit 1
+}
+
+if [[ "${1:-}" == '-h' || "${1:-}" == '--help' ]]; then
+    usage
+    exit 0
+fi
+if (( $# < 1 || $# > 2 )); then
+    usage >&2
+    exit 1
+fi
+SECS="$1"
+[[ "$SECS" =~ ^[1-9][0-9]*$ ]] || fail 'seconds must be a positive whole number.'
+
+case "$(uname -s)" in
+    Linux)
+        TIMER="${2:-codex-bedrock-refresh.timer}"
+        [[ "$TIMER" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@-]*\.timer$ ]] ||
+            fail 'timer name must end in .timer and must not contain a path.'
+        command -v systemctl >/dev/null 2>&1 || fail 'systemctl is required on Linux.'
+        systemctl --user list-timers --no-pager >/dev/null ||
+            fail 'cannot connect to your systemd user manager; run from your user login session.'
+
+        UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+        LOAD_STATE="$(systemctl --user show "$TIMER" --property=LoadState --value)"
+        CREATE_TIMER=false
+        if [[ "$LOAD_STATE" == 'not-found' ]]; then
+            (( $# == 1 )) || fail "timer not found: $TIMER"
+            REFRESH_BIN="$(command -v bedrock-codex || true)"
+            if [[ -z "$REFRESH_BIN" ]]; then
+                REFRESH_BIN="$HOME/.local/bin/bedrock-codex"
+            fi
+            [[ "$REFRESH_BIN" == /* && -x "$REFRESH_BIN" ]] ||
+                fail 'install the Linux bedrock-codex launcher in ~/.local/bin first.'
+
+            # Quote the executable for systemd, not for a shell. Escape its
+            # specifier and environment substitutions as well as literal quotes.
+            REFRESH_BIN="${REFRESH_BIN//\\/\\\\}"
+            REFRESH_BIN="${REFRESH_BIN//\"/\\\"}"
+            REFRESH_BIN="${REFRESH_BIN//%/%%}"
+            REFRESH_BIN="${REFRESH_BIN//\$/\$\$}"
+            mkdir -p "$UNIT_DIR"
+            SERVICE='codex-bedrock-refresh.service'
+            SERVICE_STATE="$(systemctl --user show "$SERVICE" --property=LoadState --value)"
+            if [[ "$SERVICE_STATE" == 'not-found' ]]; then
+                printf '%s\n' \
+                    '[Unit]' 'Description=Refresh Codex Bedrock credentials' \
+                    '' '[Service]' 'Type=oneshot' \
+                    'Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"' \
+                    "ExecStart=\"$REFRESH_BIN\" --auth" > "$UNIT_DIR/$SERVICE"
+            elif [[ "$SERVICE_STATE" != 'loaded' ]]; then
+                fail "cannot use $SERVICE (LoadState=$SERVICE_STATE)."
+            fi
+            printf '%s\n' \
+                '[Unit]' 'Description=Periodically refresh Codex Bedrock credentials' \
+                '' '[Timer]' "Unit=$SERVICE" \
+                '' '[Install]' 'WantedBy=timers.target' > "$UNIT_DIR/$TIMER"
+            CREATE_TIMER=true
+        elif [[ "$LOAD_STATE" != 'loaded' ]]; then
+            fail "cannot update $TIMER (LoadState=$LOAD_STATE)."
+        fi
+
+        mkdir -p "$UNIT_DIR/$TIMER.d"
+        # Empty OnActiveSec clears all previous monotonic AND calendar triggers.
+        printf '%s\n' \
+            '[Timer]' 'OnActiveSec=' "OnActiveSec=${SECS}s" \
+            "OnUnitActiveSec=${SECS}s" 'AccuracySec=1s' 'RandomizedDelaySec=0' \
+            > "$UNIT_DIR/$TIMER.d/interval.conf"
+        systemctl --user daemon-reload
+        if [[ "$CREATE_TIMER" == true ]]; then
+            systemctl --user enable "$TIMER"
+        fi
+        systemctl --user restart "$TIMER"
+        echo "$TIMER interval now $SECS s (current user only)"
+        systemctl --user list-timers "$TIMER" --all --no-pager
+        ;;
+    *)
+        fail 'this script requires Linux with systemd; use bedrock-codex-interval-macos.sh on macOS.'
+        ;;
+esac

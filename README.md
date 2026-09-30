@@ -7,6 +7,10 @@ Scripts for running Codex with Amazon Bedrock credentials and model routing.
 The launcher in this repository targets macOS and uses commands such as
 `launchctl`, `osascript`, and `open`. Lambda uses its own Linux launcher,
 `~/.local/bin/bedrock-codex`, and its own `~/.codex/config.toml` and catalog.
+The refresh interval helpers are platform-specific:
+
+- **macOS:** `bedrock-codex-interval-macos.sh` updates a LaunchAgent using `launchctl`.
+- **Linux:** `bedrock-codex-interval` manages a per-user systemd timer using `systemctl --user`.
 
 ## Required configuration
 
@@ -108,34 +112,97 @@ scripts/codex-bedrock-creds
 Implements the AWS `credential_process` and refreshes short-lived credentials
 when they are near expiry.
 
+### macOS refresh interval
+
 ```text
-scripts/codex-bedrock-set-interval.sh
+scripts/bedrock-codex-interval-macos.sh
 ```
 
 Changes the macOS LaunchAgent refresh interval:
 
 ```bash
-bash ~/.codex/scripts/codex-bedrock-set-interval.sh 3000
+bash ~/.codex/scripts/bedrock-codex-interval-macos.sh 3000
 ```
 
-`3000` seconds is 50 minutes.
+`3000` seconds is 50 minutes. Only the script's name has changed; its
+LaunchAgent behavior is unchanged. This helper does not work on Linux.
+
+### Linux refresh interval
+
+```text
+scripts/bedrock-codex-interval
+```
+
+Changes the Linux per-user refresh interval. This separate script is
+standalone and can be installed in `~/.local/bin` alongside `bedrock-codex`:
+
+```bash
+mkdir -p ~/.local/bin
+install -m 755 scripts/bedrock-codex-interval ~/.local/bin/bedrock-codex-interval
+bedrock-codex-interval 3000
+```
+
+`3000` seconds is 50 minutes. `30` is useful for a short test; restore the
+normal interval afterward. Ensure `~/.local/bin` is on your `PATH`.
+
+It creates and enables `codex-bedrock-refresh.timer` and a oneshot
+service that runs the installed Linux `bedrock-codex --auth` launcher. Unit
+files live in `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`. Later calls change
+the interval using a timer drop-in without replacing the service.
+
+If you already have a refresh timer, pass its name to update that timer
+instead of creating a second schedule. For example, the existing Lambda timer:
+
+```bash
+bedrock-codex-interval 3000 curatems-bedrock-auth-50m.timer
+```
+
+Updating an existing timer preserves its service and enablement. A transient
+timer remains transient; changing its interval does not make it survive a
+reboot. The default timer is enabled for future user-manager sessions.
+
+All Linux operations use `systemctl --user`: no `sudo`, no system-wide units,
+and no changes to other Linux accounts. Timers run while your user manager is
+running; this script does not enable lingering to keep it running after logout.
+The authentication command must already work non-interactively.
+
+To inspect or stop the default Linux timer:
+
+```bash
+systemctl --user list-timers codex-bedrock-refresh.timer --all
+journalctl --user -u codex-bedrock-refresh.service
+systemctl --user disable --now codex-bedrock-refresh.timer
+```
 
 ## Installation
 
-Copy the scripts into the expected local paths:
+### macOS
+
+For macOS, copy the scripts into the expected local paths:
 
 ```bash
 mkdir -p ~/.local/bin ~/.codex/scripts
 cp templates/global-gpt6-models.json ~/.codex/global-gpt6-models.json
 cp scripts/bedrock-codex ~/.local/bin/
 cp scripts/codex-bedrock-creds ~/.local/bin/
-cp scripts/codex-bedrock-set-interval.sh ~/.codex/scripts/
+cp scripts/bedrock-codex-interval-macos.sh ~/.codex/scripts/
 chmod +x ~/.local/bin/bedrock-codex
 chmod +x ~/.local/bin/codex-bedrock-creds
-chmod +x ~/.codex/scripts/codex-bedrock-set-interval.sh
+chmod +x ~/.codex/scripts/bedrock-codex-interval-macos.sh
 ```
 
-For Lambda, copy the same catalog file to the Lambda user's own
+### Linux / Lambda
+
+Install the standalone Linux interval helper in `~/.local/bin`:
+
+```bash
+mkdir -p ~/.local/bin
+install -m 755 scripts/bedrock-codex-interval ~/.local/bin/bedrock-codex-interval
+```
+
+Keep the host's existing Linux `bedrock-codex` launcher; do not replace it
+with this repository's macOS launcher. For Lambda, copy the
+same catalog file to the Lambda user's own
 `~/.codex/global-gpt6-models.json` and use its absolute path in Lambda's
 `config.toml`.
 
