@@ -139,23 +139,41 @@ standalone and can be installed in `~/.local/bin` alongside `bedrock-codex`:
 ```bash
 mkdir -p ~/.local/bin
 install -m 755 scripts/bedrock-codex-interval ~/.local/bin/bedrock-codex-interval
-bedrock-codex-interval 3000
 ```
 
-`3000` seconds is 50 minutes. `30` is useful for a short test; restore the
-normal interval afterward. Ensure `~/.local/bin` is on your `PATH`.
+Run the executable directly; **do not source it** with `source` or `.`.
+Installation alone does not turn on the refresh schedule. Run one of the
+commands below to start or update it. The command exits after configuring
+systemd; you do not need to keep a terminal open or run the script in the
+background.
 
-It creates and enables `codex-bedrock-refresh.timer` and a oneshot
-service that runs the installed Linux `bedrock-codex --auth` launcher. Unit
-files live in `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`. Later calls change
-the interval using a timer drop-in without replacing the service.
+`3000` seconds is 50 minutes. `30` is useful for a short test; restore the
+normal interval afterward. These examples use the executable's full path,
+so no `PATH` changes or shell sourcing are required. If `~/.local/bin` is on
+your `PATH`, you can use `bedrock-codex-interval` as the command name instead.
 
 If you already have a refresh timer, pass its name to update that timer
 instead of creating a second schedule. For example, the existing Lambda timer:
 
 ```bash
-bedrock-codex-interval 3000 curatems-bedrock-auth-50m.timer
+~/.local/bin/bedrock-codex-interval 3000 curatems-bedrock-auth-50m.timer
+systemctl --user list-timers curatems-bedrock-auth-50m.timer --all
 ```
+
+This restarts the named timer with the requested interval. If you do not
+already have a refresh timer, create and start the persistent default timer:
+
+```bash
+~/.local/bin/bedrock-codex-interval 3000
+systemctl --user list-timers codex-bedrock-refresh.timer --all
+```
+
+Choose one schedule; do not run both the existing and default timers.
+The default command creates, enables, and starts `codex-bedrock-refresh.timer`
+and a oneshot service that runs the installed Linux `bedrock-codex --auth`
+launcher. Unit files live in `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`.
+Later calls change the interval using a timer drop-in without replacing
+the service.
 
 Updating an existing timer preserves its service and enablement. A transient
 timer remains transient; changing its interval does not make it survive a
@@ -199,6 +217,10 @@ Install the standalone Linux interval helper in `~/.local/bin`:
 mkdir -p ~/.local/bin
 install -m 755 scripts/bedrock-codex-interval ~/.local/bin/bedrock-codex-interval
 ```
+
+Then run the helper directly, not with `source`, using one of the startup
+commands in [Linux refresh interval](#linux-refresh-interval). Copying or
+installing the script does not start a timer by itself.
 
 Keep the host's existing Linux `bedrock-codex` launcher; do not replace it
 with this repository's macOS launcher. For Lambda, copy the
